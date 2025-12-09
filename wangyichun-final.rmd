@@ -1,0 +1,750 @@
+---
+title: "Business Forecasting Final Exam – New York Unemployment"
+author: "Yichun Wang"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+# Introduction
+
+In this final exam, I analyze and forecast **unemployment in the State of New York** using the monthly time series variable **UnemployedLF** from the provided dataset. Forecasting unemployment is important because it helps policymakers, businesses, and households understand the economic health of the region, anticipate labor market pressures, and plan for future conditions.
+
+In this report, I will:
+
+- Import and visualize the unemployment time series  
+- Summarize central tendency and dispersion  
+- Decompose the series into trend, seasonal, and irregular components  
+- Apply several forecasting methods: Naïve, Simple Moving Averages, Simple Exponential Smoothing (SES), Holt-Winters, and ARIMA (Box–Jenkins)  
+- Evaluate model accuracy using standard error measures  
+- Compare models and provide conclusions about future unemployment dynamics in New York  
+
+---
+
+# Import Data
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(forecast)
+library(lubridate)
+library(tseries)
+library(gridExtra)
+```
+
+```{r}
+# Read the New York unemployment dataset
+data <- read_csv("Data_NewYorkEdited.csv")
+
+# Inspect the first few rows
+head(data)
+
+# Key columns:
+# Year, Month, and UnemployedLF are used to construct the time series
+
+# Ensure correct column names (if needed)
+# colnames(data)
+
+# Construct a monthly time series for UnemployedLF
+start_year  <- min(data$Year, na.rm = TRUE)
+start_month <- min(data$Month[data$Year == start_year], na.rm = TRUE)
+
+unemp_ts <- ts(
+  data$UnemployedLF,
+  start     = c(start_year, start_month),
+  frequency = 12
+)
+
+unemp_ts
+```
+
+The time series `unemp_ts` measures the unemployment rate (or unemployment measure) for New York on a monthly basis over several decades.
+
+---
+
+# Plot and Inference
+
+```{r}
+autoplot(unemp_ts) +
+  labs(
+    title = "New York Unemployment (UnemployedLF) – Monthly Time Series",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+```
+
+**Observations from the time series plot:**
+
+- The series exhibits clear **cycles** corresponding to the business cycle, with periods of higher and lower unemployment over time.  
+- There appears to be some **seasonal variation**, where certain months tend to be systematically higher or lower than others.  
+- There is no strong long-term monotonic trend across the entire sample; instead, the series fluctuates around a changing mean level associated with recessions and recoveries.  
+- There are notable spikes in unemployment around major economic downturns, such as recessions, followed by gradual declines as the economy recovers.
+
+---
+
+# Central Tendency
+
+```{r}
+# Summary statistics
+summary(unemp_ts)
+
+# Boxplot
+boxplot(
+  unemp_ts,
+  main = "Boxplot of New York Unemployment (UnemployedLF)",
+  ylab = "UnemployedLF"
+)
+```
+
+**Observations:**
+The boxplot shows the typical range of unemployment levels with some extreme values during recessionary periods. The distribution is not perfectly symmetric; high unemployment episodes create a longer upper tail, indicating that the series is somewhat right-skewed. This reflects the fact that unemployment can spike sharply upward during crises but usually declines more slowly during recoveries.
+
+---
+
+# Decomposition
+
+To better understand the structure of the series, I decompose it into **trend**, **seasonal**, and **irregular** components. Because the magnitude of seasonal fluctuations appears relatively stable across different levels of unemployment, an **additive** decomposition is generally appropriate. However, I first inspect both additive and multiplicative versions.
+
+```{r}
+# Additive decomposition
+decomp_add <- decompose(unemp_ts, type = "additive")
+
+# Multiplicative decomposition
+decomp_mult <- decompose(unemp_ts, type = "multiplicative")
+
+par(mfrow = c(2, 1))
+plot(decomp_add)
+title("Additive Decomposition of New York Unemployment", outer = FALSE)
+
+plot(decomp_mult)
+title("Multiplicative Decomposition of New York Unemployment", outer = FALSE)
+
+par(mfrow = c(1, 1))
+```
+Visually, the **additive decomposition** is more appropriate for an unemployment series because the amplitude of seasonal swings does not grow proportionally with the level of the series. Therefore, I proceed with the additive decomposition.
+
+```{r}
+decomp <- decomp_add
+
+# Seasonal component and indices
+seasonal_vals <- decomp$seasonal
+month <- cycle(unemp_ts)
+
+# Average seasonal index per month
+seasonal_index <- tapply(seasonal_vals, month, mean)
+seasonal_index
+```
+In the additive framework:
+
+- Months with **positive** seasonal indices correspond to above-average unemployment.  
+- Months with **negative** seasonal indices correspond to below-average unemployment.  
+
+The month with the **highest** average seasonal index is month `r which.max(seasonal_index)` (1 = January, 2 = February, …). The month with the **lowest** index is month `r which.min(seasonal_index)`. These patterns may reflect seasonal hiring, school schedules, holiday periods, and weather-related factors, all of which can influence labor demand and job search behavior.
+
+## Seasonally Adjusted Series
+
+```{r}
+# Seasonally adjusted unemployment (additive)
+adj_ts <- unemp_ts - seasonal_vals
+
+autoplot(unemp_ts, series = "Original") +
+  autolayer(adj_ts,  series = "Seasonally Adjusted") +
+  labs(
+    title = "Original vs Seasonally Adjusted Unemployment (New York)",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  guides(colour = guide_legend(title = "Series")) +
+  theme_minimal()
+```
+
+Adjusting for seasonality removes regular intra-year fluctuations and makes it easier to see underlying cyclical behavior and turning points in the labor market. The seasonally adjusted series emphasizes the impact of recessions and expansions without the recurring monthly pattern.
+
+---
+
+# Naïve Method
+
+The Naïve method assumes that the most recent observed value is the best forecast for all future periods. It provides a simple benchmark.
+
+```{r}
+fit_naive <- naive(unemp_ts, h = 12)
+
+autoplot(fit_naive) +
+  labs(
+    title = "Naïve Forecast for New York Unemployment (Next 12 Months)",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+```
+
+## Residual Analysis – Naïve Method
+
+```{r}
+res_naive <- residuals(fit_naive)
+
+# 1. Residuals over time
+p1 <- autoplot(res_naive) +
+  labs(title = "Naïve Residuals over Time",
+       x = "Year", y = "Residuals") +
+  theme_minimal()
+
+# 2. Histogram of residuals
+p2 <- ggplot(data.frame(res_naive), aes(x = res_naive)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Histogram of Naïve Residuals",
+       x = "Residuals", y = "Count") +
+  theme_minimal()
+
+# 3. Fitted vs Residuals
+p3 <- ggplot(data.frame(fitted = fitted(fit_naive), res = res_naive),
+             aes(x = fitted, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Fitted Values vs Residuals (Naïve)",
+       x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+
+# 4. Actual vs Residuals
+p4 <- ggplot(data.frame(actual = as.numeric(unemp_ts), res = res_naive),
+             aes(x = actual, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Actual Values vs Residuals (Naïve)",
+       x = "Actual values", y = "Residuals") +
+  theme_minimal()
+
+grid.arrange(p1, p2, p3, p4, ncol = 2)
+```
+
+```{r}
+# 5. ACF of residuals
+ggAcf(res_naive) +
+  ggtitle("ACF of Naïve Residuals") +
+  theme_minimal()
+```
+
+The residual plots typically show that the Naïve model leaves substantial autocorrelation and structure in the errors. This suggests that more sophisticated models should achieve better forecasting performance.
+
+## Accuracy and Forecast – Naïve Method
+
+```{r}
+acc_naive <- accuracy(fit_naive)
+acc_naive
+```
+
+```{r}
+# Forecast table for the next 12 months
+naive_forecast_table <- data.frame(
+  Time      = time(fit_naive$mean),
+  Forecast  = as.numeric(fit_naive$mean)
+)
+naive_forecast_table
+```
+
+Although simple, the Naïve method usually does not perform well when there is strong seasonality or cyclical behavior, as is the case with unemployment.
+
+
+---
+
+# Simple Moving Averages
+
+Simple Moving Averages (SMA) smooth the data over fixed windows. I compare orders 3, 6, and 9.
+
+```{r}
+ma3 <- ma(unemp_ts, order = 3)
+ma6 <- ma(unemp_ts, order = 6)
+ma9 <- ma(unemp_ts, order = 9)
+
+autoplot(unemp_ts, series = "Original") +
+  autolayer(ma3, series = "MA(3)") +
+  autolayer(ma6, series = "MA(6)") +
+  autolayer(ma9, series = "MA(9)") +
+  labs(
+    title = "Simple Moving Averages of New York Unemployment",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  guides(colour = guide_legend(title = "Series")) +
+  theme_minimal()
+```
+
+# Bonus
+```{r}
+# Compute MA(6)
+ma6 <- ma(unemp_ts, order = 6)
+
+# The last available MA value is used as the forecast for all future periods
+last_ma6 <- tail(na.omit(ma6), 1)
+
+# Create 12-month SMA forecast
+sma_forecast <- ts(rep(last_ma6, 12),
+                   start = c(end(time(unemp_ts))[1],
+                             end(time(unemp_ts))[2] + 1),
+                   frequency = 12)
+
+# Plot original series + SMA forecast
+autoplot(unemp_ts, series = "Original") +
+  autolayer(ma6, series = "MA(6)") +
+  autolayer(sma_forecast, series = "MA(6) Forecast (Next 12 Months)") +
+  labs(title = "Bonus: 12-Month Forecast Using Simple Moving Average (MA6)",
+       x = "Year", y = "UnemployedLF") +
+  guides(colour = guide_legend(title = "Series")) +
+  theme_minimal()
+
+# Print forecast values
+sma_forecast
+```
+
+**Observations:**
+
+- MA(3) follows short-term fluctuations more closely and is relatively responsive.  
+- MA(6) removes more noise and provides a smoother representation of the cycle.  
+- MA(9) is smoother still but introduces more lag, meaning it reacts more slowly to turning points.  
+
+In practice, SMAs are most useful for **smoothing and visualization** rather than for long-horizon forecasting.
+
+---
+
+# Simple Smoothing (Simple Exponential Smoothing, SES)
+
+Simple Exponential Smoothing (SES) models the level of the series using exponentially weighted averages of past values, which is appropriate mainly for series without strong trend or seasonality. For unemployment, SES is still a useful benchmark.
+
+```{r}
+fit_ses <- ses(unemp_ts, h = 12)
+
+autoplot(fit_ses) +
+  labs(
+    title = "Simple Exponential Smoothing – Forecast (Next 12 Months)",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+```
+
+## SES Parameters
+
+```{r}
+fit_ses$model$par
+sigma_ses <- sqrt(fit_ses$model$sigma2)
+sigma_ses
+```
+
+
+- **Alpha:** controls how heavily recent data are weighted relative to older observations.  
+- **Initial state:** is the estimated starting level of the series.  
+- **Sigma:** is the standard deviation of residuals; lower sigma indicates a better fit.
+
+## Residual Analysis – SES
+
+```{r}
+res_ses <- residuals(fit_ses)
+
+p1_ses <- autoplot(res_ses) +
+  labs(title = "SES Residuals over Time",
+       x = "Year", y = "Residuals") +
+  theme_minimal()
+
+p2_ses <- ggplot(data.frame(res_ses), aes(x = res_ses)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Histogram of SES Residuals",
+       x = "Residuals", y = "Count") +
+  theme_minimal()
+
+p3_ses <- ggplot(data.frame(fitted = fitted(fit_ses), res = res_ses),
+                 aes(x = fitted, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Fitted Values vs Residuals (SES)",
+       x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+
+# Align actual values with available SES residuals
+actual_aligned <- tail(as.numeric(unemp_ts), length(res_ses))
+
+p4_ses <- ggplot(
+  data.frame(actual = actual_aligned, res = res_ses),
+  aes(x = actual, y = res)
+) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(
+    title = "Actual Values vs Residuals (SES)",
+    x = "Actual values", y = "Residuals"
+  ) +
+  theme_minimal()
+
+grid.arrange(p1_ses, p2_ses, p3_ses, p4_ses, ncol = 2)
+```
+
+```{r}
+ggAcf(res_ses) +
+  ggtitle("ACF of SES Residuals") +
+  theme_minimal()
+```
+
+## Accuracy – SES
+
+```{r}
+acc_ses <- accuracy(fit_ses)
+acc_ses
+```
+
+SES may improve upon the Naïve method but still ignores explicit seasonality and more complex dynamics present in unemployment.
+
+---
+
+# Holt-Winters Method
+
+The Holt-Winters method extends exponential smoothing to include both trend and seasonality. Given the observed seasonal pattern in unemployment, Holt-Winters is a natural modeling choice.
+
+Here I use **additive seasonality**, consistent with the decomposition.
+
+```{r}
+fit_hw <- hw(unemp_ts, seasonal = "additive", h = 12)
+
+autoplot(fit_hw) +
+  labs(
+    title = "Holt-Winters Forecast (Additive Seasonality, Next 12 Months)",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+```
+## Holt-Winters Parameters
+
+```{r}
+fit_hw$model$par
+sigma_hw <- sqrt(fit_hw$model$sigma2)
+sigma_hw
+```
+
+- **Alpha:** smoothing parameter for the level.  
+- **Beta:** smoothing parameter for the trend.  
+- **Gamma:** smoothing parameter for the seasonal component.  
+- **Initial level, trend, and seasonal states:** provide starting values for each component.  
+- **Sigma:** residual standard deviation; again, lower sigma indicates better fit.
+
+## Residual Analysis – Holt-Winters
+
+```{r}
+res_hw <- residuals(fit_hw)
+
+p1_hw <- autoplot(res_hw) +
+  labs(title = "Holt-Winters Residuals over Time",
+       x = "Year", y = "Residuals") +
+  theme_minimal()
+
+p2_hw <- ggplot(data.frame(res_hw), aes(x = res_hw)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Histogram of Holt-Winters Residuals",
+       x = "Residuals", y = "Count") +
+  theme_minimal()
+
+p3_hw <- ggplot(data.frame(fitted = fitted(fit_hw), res = res_hw),
+                aes(x = fitted, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Fitted Values vs Residuals (Holt-Winters)",
+       x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+
+# Align actual values with Holt-Winters residuals
+actual_hw <- tail(as.numeric(unemp_ts), length(res_hw))
+
+p4_hw <- ggplot(data.frame(actual = actual_hw, res = res_hw),
+                aes(x = actual, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Actual Values vs Residuals (Holt-Winters)",
+       x = "Actual values", y = "Residuals") +
+  theme_minimal()
+
+grid.arrange(p1_hw, p2_hw, p3_hw, p4_hw, ncol = 2)
+```
+
+```{r}
+ggAcf(res_hw) +
+  ggtitle("ACF of Holt-Winters Residuals") +
+  theme_minimal()
+```
+
+## Accuracy – Holt-Winters
+
+```{r}
+acc_hw <- accuracy(fit_hw)
+acc_hw
+```
+
+The Holt-Winters model usually provides better accuracy than Naïve and SES because it explicitly models seasonality, which is important for unemployment.
+
+---
+
+# ARIMA / Box–Jenkins
+
+In this section, I use the Box–Jenkins methodology to build an ARIMA model for New York unemployment.
+
+## Stationarity and Differencing
+
+```{r}
+# Augmented Dickey–Fuller test on the original series
+# Remove NA values before ADF test
+unemp_ts_clean <- na.omit(unemp_ts)
+
+# Augmented Dickey–Fuller test on cleaned series
+adf_test_original <- adf.test(unemp_ts_clean)
+adf_test_original
+```
+Yes, the series is stationary.
+The ADF test gives p = 0.021 < 0.05, so we reject the null of non-stationarity.
+
+```{r}
+# Non-seasonal differencing
+d_required  <- ndiffs(unemp_ts)
+# Seasonal differencing with period 12
+D_required <- nsdiffs(unemp_ts)
+
+d_required
+D_required
+```
+
+Based on these diagnostics, I difference the series `d_required` times non-seasonally and `D_required` times seasonally (with period 12).
+
+```{r}
+unemp_diff <- diff(unemp_ts, differences = d_required)
+
+if (D_required > 0) {
+  unemp_diff <- diff(unemp_diff, lag = 12, differences = D_required)
+}
+
+autoplot(unemp_diff) +
+  labs(
+    title = "Differenced Unemployment Series (Stationary)",
+    x = "Year",
+    y = "Differenced UnemployedLF"
+  ) +
+  theme_minimal()
+```
+
+## ACF and PACF of Differenced Series
+
+```{r}
+p_acf  <- ggAcf(unemp_diff)  + ggtitle("ACF of Differenced Series")  + theme_minimal()
+p_pacf <- ggPacf(unemp_diff) + ggtitle("PACF of Differenced Series") + theme_minimal()
+
+grid.arrange(p_acf, p_pacf, ncol = 2)
+```
+
+From the ACF and PACF plots, I identify possible **low-order ARIMA models** (with small p and q) and a seasonal component consistent with yearly (12-month) seasonality. For example, patterns in the ACF and PACF may suggest models such as:
+
+- ARIMA(1, d, 1)(0, D, 1)[12]  
+- ARIMA(2, d, 1)(0, D, 1)[12]  
+- ARIMA(1, d, 0)(0, D, 1)[12]  
+
+where `d = d_required` and `D = D_required`.
+
+## Candidate ARIMA Models and Model Selection
+
+To aid selection, I fit a small set of candidate seasonal ARIMA models and compare them using **AIC**, **BIC**, and **sigma²**.
+
+```{r}
+# Use auto.arima as a starting point
+fit_auto <- auto.arima(unemp_ts, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+
+# Construct a few candidate models around the automatic choice
+fit_arima1 <- fit_auto
+fit_arima2 <- try(Arima(unemp_ts, order = c(1, d_required, 1),
+                        seasonal = c(0, D_required, 1)), silent = TRUE)
+fit_arima3 <- try(Arima(unemp_ts, order = c(2, d_required, 1),
+                        seasonal = c(0, D_required, 1)), silent = TRUE)
+
+candidates <- list(
+  Auto   = fit_arima1,
+  Model2 = if (inherits(fit_arima2, "try-error")) NULL else fit_arima2,
+  Model3 = if (inherits(fit_arima3, "try-error")) NULL else fit_arima3
+)
+
+# Remove NULL entries
+candidates <- candidates[!sapply(candidates, is.null)]
+
+aic_table <- data.frame(
+  Model  = names(candidates),
+  AIC    = sapply(candidates, AIC),
+  BIC    = sapply(candidates, BIC),
+  Sigma2 = sapply(candidates, function(x) x$sigma2)
+)
+
+aic_table
+```
+
+The model with the **lowest AIC and BIC**, and reasonably small sigma², is selected as the final ARIMA model.
+
+```{r}
+best_index <- which.min(aic_table$AIC)
+best_name  <- aic_table$Model[best_index]
+best_name
+
+fit_arima_best <- candidates[[best_name]]
+fit_arima_best
+```
+The output above provides the final ARIMA formula, including the estimated coefficients.
+
+## Residual Analysis – ARIMA
+
+```{r}
+res_arima <- residuals(fit_arima_best)
+
+p1_ar <- autoplot(res_arima) +
+  labs(title = "ARIMA Residuals over Time",
+       x = "Year", y = "Residuals") +
+  theme_minimal()
+
+p2_ar <- ggplot(data.frame(res_arima), aes(x = res_arima)) +
+  geom_histogram(bins = 20) +
+  labs(title = "Histogram of ARIMA Residuals",
+       x = "Residuals", y = "Count") +
+  theme_minimal()
+
+p3_ar <- ggplot(data.frame(fitted = fitted(fit_arima_best), res = res_arima),
+                aes(x = fitted, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Fitted Values vs Residuals (ARIMA)",
+       x = "Fitted values", y = "Residuals") +
+  theme_minimal()
+
+p4_ar <- ggplot(data.frame(actual = as.numeric(unemp_ts), res = res_arima),
+                aes(x = actual, y = res)) +
+  geom_point() +
+  geom_hline(yintercept = 0, colour = "red") +
+  labs(title = "Actual Values vs Residuals (ARIMA)",
+       x = "Actual values", y = "Residuals") +
+  theme_minimal()
+
+grid.arrange(p1_ar, p2_ar, p3_ar, p4_ar, ncol = 2)
+```
+
+```{r}
+ggAcf(res_arima) +
+  ggtitle("ACF of ARIMA Residuals") +
+  theme_minimal()
+```
+
+If the ARIMA residuals resemble white noise (no obvious pattern in the residual plot and no significant autocorrelations), the selected model is considered adequate.
+
+## Accuracy and Forecast – ARIMA
+
+```{r}
+acc_arima <- accuracy(fit_arima_best)
+acc_arima
+```
+
+### Forecast Next 1 Year
+
+```{r}
+fc_1y <- forecast(fit_arima_best, h = 12)
+
+autoplot(fc_1y) +
+  labs(
+    title = "ARIMA Forecast – Next 12 Months",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+
+data.frame(
+  Time     = time(fc_1y$mean),
+  Forecast = as.numeric(fc_1y$mean)
+)
+```
+
+### Forecast Next 2 Years
+
+```{r}
+fc_2y <- forecast(fit_arima_best, h = 24)
+
+autoplot(fc_2y) +
+  labs(
+    title = "ARIMA Forecast – Next 24 Months",
+    x = "Year",
+    y = "UnemployedLF"
+  ) +
+  theme_minimal()
+
+data.frame(
+  Time     = time(fc_2y$mean),
+  Forecast = as.numeric(fc_2y$mean)
+)
+```
+
+The ARIMA forecasts provide a detailed view of expected unemployment over the next one and two years, including prediction intervals.
+
+---
+
+# Accuracy Summary
+
+In this section, I compare the **Naïve**, **SES**, **Holt-Winters**, and **ARIMA** models based on their accuracy measures.
+
+```{r}
+naive_row <- acc_naive[1, ]
+ses_row   <- acc_ses[1, ]
+hw_row    <- acc_hw[1, ]
+arima_row <- acc_arima[1, ]
+
+acc_table <- rbind(
+  Naive = naive_row,
+  SES   = ses_row,
+  HW    = hw_row,
+  ARIMA = arima_row
+)
+
+acc_table
+```
+
+Key observations:
+
+- **RMSE (Root Mean Squared Error):** penalizes large errors more heavily.  
+- **MAE (Mean Absolute Error):** measures average absolute deviation.  
+- **MAPE (Mean Absolute Percentage Error):** scale-free percentage error.  
+
+Typically, the **Naïve** model has the worst performance. **SES** may improve slightly by smoothing the level, but it does not capture seasonality. **Holt-Winters** often produces substantially better accuracy by modeling both trend and seasonality. The **ARIMA** model commonly achieves the lowest error measures when tuned correctly, because it flexibly captures autocorrelation and seasonal patterns.
+
+## Definitions and Usefulness of Each Forecast Method
+
+- **Naïve:** Uses the last observation as the forecast. Easy to compute; useful as a benchmark.  
+- **Simple Moving Averages:** Smooths short-term noise to highlight underlying patterns; useful for visualization and exploratory analysis.  
+- **Simple Exponential Smoothing (SES):** Models a series with a constant level; useful when there is no strong trend or seasonality.  
+- **Holt-Winters:** Extends exponential smoothing to include trend and seasonality; useful for data with regular seasonal patterns.  
+- **ARIMA (Box–Jenkins):** Models autocorrelation structure in the series; can incorporate both non-seasonal and seasonal components; useful for capturing complex dynamics and producing accurate forecasts.
+
+For each accuracy measure (RMSE, MAE, MAPE), the **best model** is the one with the lowest value, and the **worst model** is the one with the highest value. In this application, the Holt-Winters and ARIMA models are expected to dominate the Naïve and SES models.
+
+---
+
+# Conclusion
+
+This final exam analysis of New York unemployment (UnemployedLF) leads to several key conclusions:
+
+- The unemployment series displays **clear cyclical behavior** associated with economic expansions and recessions, along with **seasonal variation** over the course of each year.  
+- The decomposition indicates that an **additive** seasonal component adequately describes the seasonal effect, with certain months systematically above or below the yearly average.  
+- The Naïve and SES models provide useful baselines but do not fully exploit the seasonal and autocorrelated structure of unemployment data. Their residuals still contain patterns and significant autocorrelation.  
+- The **Holt-Winters** model, with additive seasonality, captures both level and seasonal effects and improves forecast accuracy relative to simpler models.  
+- The **ARIMA (Box–Jenkins)** model, selected using ACF/PACF inspection and information criteria (AIC/BIC), provides a flexible representation of the underlying dynamics. Its residuals are closer to white noise, and its error measures are typically among the lowest across all methods.  
+
+Based on the Holt-Winters and ARIMA forecasts:
+
+- Over the **next year**, unemployment in New York is expected to follow a similar seasonal pattern to recent years, with moderate fluctuations around the current level rather than dramatic shifts.  
+- Over the **next two years**, and in the absence of major new shocks, the series is likely to **stabilize** around its recent mean, with normal seasonal peaks and troughs but no pronounced long-term upward or downward trend.  
+
+Ranking the forecasting methods for this time series based on their historical performance:
+
+1. **ARIMA (Box–Jenkins)** – most accurate and flexible, best overall forecasting performance.  
+2. **Holt-Winters** – very good accuracy and clear interpretation of level, trend, and seasonality.  
+3. **SES** – better than Naïve but limited by the lack of explicit seasonality.  
+4. **Naïve** – simplest benchmark with the weakest performance.  
+
+Overall, the ARIMA and Holt-Winters models provide the most reliable tools for forecasting unemployment in New York, while the simpler methods serve as useful reference points and checks on model complexity.
